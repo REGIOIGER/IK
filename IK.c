@@ -11,6 +11,25 @@
 #include <Eigen/LU> 
 #include <Eigen/SVD>
 #include <unsupported/Eigen/MatrixFunctions>
+
+#define ToDeg 180/M_PI
+#define ToRad M_PI/180
+
+#define BODY 1
+#define RLEG_J0 2
+#define RLEG_J1 3
+#define RLEG_J2 4
+#define RLEG_J3 5
+#define RLEG_J4 6
+#define RLEG_J5 7
+
+#define LLEG_J0 8
+#define LLEG_J1 9
+#define LLEG_J2 10
+#define LLEG_J3 11
+#define LLEG_J4 12
+#define LLEG_J5 13
+
 using namespace Eigen;
 using namespace std;
 
@@ -46,6 +65,8 @@ public:
 };
 
 bipedLINK uLINK[14];
+bipedLINK Rfoot;
+bipedLINK Lfoot;
 
 void PrintLinkName(int j) {	
 	if(j!=0){
@@ -146,36 +167,72 @@ MatrixXd CalcJacobian(const vector<int> &idx){
 VectorXd rot2omega(const MatrixXd& R){
 // T.Sugihara "Solvability-unconcerned Inverse Kinemacics based on 
 // Levenberg-Marquardt method with Robust Damping," Humanoids 2009
-Vector3d w;
-Vector3d el;
-el << R(3,2)-R(2,3), R(1,3)-R(3,1), R(2,1)-R(1,2);
+	Vector3d w;
+	Vector3d el;
+	
+	el << R(2,1)-R(1,2), R(0,2)-R(2,0), R(1,0)-R(0,1);
+	double norm_el = el.norm();
 
-double norm_el = el.norm();
-
-if (norm_el > 2.2204e-16){
-    w = atan2(norm_el, R.trace()-1)/norm_el * el;	
+	if (norm_el > 2.2204e-16){
+		w = atan2(norm_el, R.trace()-1)/norm_el * el;
+	}
+	else if (R(0,0)>0 && R(1,1)>0 && R(2,2)>0)
+		w << 0, 0, 0;
+	else{
+		w << R(0,0)+1, R(1,1)+1, R(2,2)+1;
+		w = M_PI/2*w;
+	}
+	return w;
 }
-else if (R(1,1)>0 && R(2,2)>0 && R(3,3)>0)
-    w << 0, 0, 0;
-else{
-    w << R(1,1)+1, R(2,2)+1, R(3,3)+1;
-	w = M_PI/2*w;
+
+VectorXd CalcVWerr(const bipedLINK& Cref, const bipedLINK& Cnow){
+	Vector3d perr;
+	Vector3d werr;
+	MatrixXd Rerr;
+	VectorXd err(6);
+
+	perr = Cref.p - Cnow.p;
+	Rerr = Cnow.R.transpose() * Cref.R;
+	werr = Cnow.R * rot2omega(Rerr);
+	
+	err << perr, werr;
+
+	return err;
 }
-return w;
+
+void MoveJoints(const vector<int> &idx, const VectorXd& dq){
+
+	for(unsigned n=0; n<idx.size(); n++){
+    int j = idx[n];
+    uLINK[j].q = uLINK[j].q + dq(n);
+	}
 }
 
-VectorXd CalcVWerr(int Cref, int Cnow){
-Vector3d perr;
-Vector3d werr;
-MatrixXd Rerr;
-VectorXd err;
+double InverseKinematics(int to, const bipedLINK& Target){
+	
+	VectorXd err;
+	VectorXd dq;
+	vector<int> idx;
+	MatrixXd J;
 
-perr = uLINK[Cref].p - uLINK[Cnow].p;
-Rerr = uLINK[Cnow].R.transpose() * uLINK[Cref].R;
-werr = uLINK[Cnow].R * rot2omega(Rerr);
+	double lambda = 0.9;
+	
+	idx = FindRoute(to);
+	ForwardKinematics(1);
+	err = CalcVWerr(Target, uLINK[to]);
+	
+	for(int n = 1;n <= 10; n++){
+	if (err.norm() < 1e-6) break;	
+	J  = CalcJacobian(idx);
+	dq = lambda * (J.colPivHouseholderQr().solve(err));
+	cout << "dq:" << dq << endl; 
+	MoveJoints(idx, dq);
+	ForwardKinematics(1);
+	err = CalcVWerr(Target, uLINK[to]);
+	}
 
-err << perr, werr;
-return err;
+	
+	return err.norm();
 }
 
 int main() {
@@ -433,17 +490,58 @@ int main() {
   uLINK[1].p << 0.0, 0.0, 0.65;
   ForwardKinematics(1);
 
+
+  //set non singular posture
+  uLINK[RLEG_J2].q = -5.0*ToRad;
+  uLINK[RLEG_J3].q = 10.0*ToRad;
+  uLINK[RLEG_J4].q = -5.0*ToRad;
+
+  uLINK[LLEG_J2].q = -5.0*ToRad;
+  uLINK[LLEG_J3].q = 10.0*ToRad;
+  uLINK[LLEG_J4].q = -5.0*ToRad;
+
+  //uLINK[BODY].p << 0.0, 0.0, 0.7;
+  //uLINK[BODY].R = eye(3);
+
+  uLINK[BODY].p << 0.0, 0.0, 0.5;
+  //uLINK(BODY).R = eye(3);
+  
+  double rerr_norm;
+  double lerr_norm;
+    
+  Rfoot.p << 0.0900, -0.1538, 0.0214;
+  Rfoot.R << 0.7487,   -0.4117,    0.5195, 
+             0.3269,    0.9111,    0.2509, 
+			-0.5767,   -0.0180,    0.8168;
+
+  rerr_norm = InverseKinematics(RLEG_J5, Rfoot);
+  cout << "rerr_norm:" << rerr_norm << endl;
+    
+
+  Lfoot.p << -0.0044, 0.0519, 0.0321;
+  Lfoot.R << 0.8820,   -0.4550,    0.1227,
+			 0.4354,    0.8864,    0.1573,
+			-0.1803,   -0.0853,    0.9799;
+			
+  lerr_norm = InverseKinematics(LLEG_J5, Lfoot);
+  cout << "lerr_norm:" << lerr_norm << endl;
+
+
+			
+
+/*			
   vector<int> idx;
-  idx = FindRoute(7);
+  idx = FindRoute(14);
   cout << "idx contains:";
   for (unsigned i=0;i<idx.size();i++)
   cout << ' ' << idx[i];
   cout << '\n';
   //SetJointAngles(idx,qf);
-  MatrixXd J(6,6);
-  J = CalcJacobian(idx);
+  //MatrixXd J(6,6);
+  //J = CalcJacobian(idx);
   
-  cout << "\nJ: " << J << "\n";
+  //cout << "\nJ: " << J << "\n";
+   */
 
 return 0;
 }
